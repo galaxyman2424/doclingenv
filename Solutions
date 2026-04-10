@@ -30,3 +30,47 @@ Suggested improvement: GraalPy's bundled pip (or graalpy-maven-plugin) should su
 [G-5] graalpy-maven-plugin Virtual Environment Path Options
 The Problem: The Maven plugin auto-manages python-resources/venv and python-resources/home, but it does not expose options to point at a pre-built external venv that already has docling installed (with all patches applied). Every clean build re-runs pip install docling, which takes several minutes and loses all manual patches.
 Requested feature: Add a <externalVenvPath> configuration option to the plugin that skips venv creation and pip install if the target directory already exists, or that accepts a path to an existing venv managed outside of Maven.
+
+
+Section 3: Rejected Solutions
+
+✗ REJECTED — Inter-Process Communication (IPC) via Socket or Pipe
+Why it was considered: Run a CPython subprocess as a dedicated PDF-conversion server; the Java side sends file paths over a socket or stdin pipe and receives markdown back. Avoids GraalPy entirely.
+Why it was rejected:
+This is architecturally identical to the ProcessBuilder subprocess approach already in PythonRunner.java. It adds socket/serialization complexity for zero functional gain over what already exists.
+The entire purpose of this project is in-process GraalVM polyglot embedding. IPC completely abandons that goal.
+Adds a daemon process that must be managed (lifecycle, crash recovery, port conflicts).
+No advantage over just calling python -c directly, which already works.
+
+✗ REJECTED — gRPC Microservice Wrapping Docling
+Why it was considered: Wrap Docling in a CPython gRPC server, expose a ConvertPdf(path) -> markdown RPC, call it from Java using the standard gRPC Java client.
+Why it was rejected:
+Same fundamental objection as IPC: abandons in-process embedding.
+Adds enormous operational overhead: gRPC server must be started, kept alive, secured, and versioned separately from the Java application.
+Introduces network latency for what should be a local library call.
+Overkill for a problem that is one GraalPy ctypes patch away from being solved in-process.
+Appropriate only if this were a multi-tenant conversion service — not for an embedded document processing tool.
+
+✗ REJECTED — Rewrite PDF Parsing in Pure Java (Apache PDFBox)
+Why it was considered: Use Apache PDFBox or iText entirely on the Java side, bypassing Python and GraalPy altogether for PDF processing.
+Why it was rejected:
+Docling's value is not just text extraction — it is AI-driven layout analysis, table structure detection, and semantic chunking. PDFBox extracts raw text with no layout understanding.
+Reproducing Docling's model pipeline in Java would require porting or re-training the IBM layout models, which is a months-long effort.
+This rejects the entire premise of the project (Docling integration) in favor of a much weaker tool.
+Acceptable only as a last-resort fallback if GraalPy compatibility is permanently impossible.
+
+✗ REJECTED — Switch from GraalPy to Jython
+Why it was considered: Jython is a JVM-based Python implementation. It has no ctypes issues because it doesn't support native C extensions at all — so the question of C callbacks never arises.
+Why it was rejected:
+Jython only supports Python 2.7. Docling requires Python 3.10+. This is a hard incompatibility with no path forward.
+Jython has been effectively unmaintained for years.
+Even if Jython supported Python 3, Docling's ML dependencies (torch, numpy) require CPython C extensions that Jython cannot run.
+Non-starter.
+
+✗ REJECTED — Monkey-Patching pypdfium2 at Runtime from Java
+Why it was considered: Before the JVM starts the GraalPy context, inject Python code that replaces pypdfium2's callback registration with a no-op or file-path-based alternative.
+Why it was rejected:
+The patch has to be applied before pypdfium2 loads its bindings, meaning it must be injected into the module load sequence — fragile and order-dependent.
+Any pypdfium2 upgrade resets the problem.
+The correct fix is either in GraalPy (fix ctypes) or in Docling (use file path instead of stream) — both of which are cleaner and more durable than runtime monkey-patching from Java.
+Debugging a monkey-patched polyglot context is extremely painful.
