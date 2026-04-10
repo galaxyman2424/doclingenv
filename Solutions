@@ -1,0 +1,32 @@
+Possible Graalpy Solutions
+
+[G-1] Native C Function Pointer Callbacks from Python Callables
+The Core Problem: GraalPy cannot convert a Python CFUNCTYPE-wrapped callable into a native C function pointer. This is the primary blocker. pypdfium2 registers a get_bufreader callback (m_GetBlock) using ctypes.CFUNCTYPE, and when it tries to pass that callback to the underlying C library, GraalPy throws:
+Cannot convert Object pointer to native
+What GraalPy needs to implement:
+ctypes.CFUNCTYPE.__call__ must produce a real native trampoline — a small native stub that, when called by C code, re-enters the Python interpreter and invokes the Python callable.
+CPython does this via libffi closure allocation (ffi_closure_alloc). GraalPy's ctypes layer needs an equivalent mechanism.
+Why this is hard: GraalPy runs on the JVM, so there is no direct equivalent of "allocate a native stub that calls back into a managed runtime." It requires either Truffle NFI (Native Function Interface) closure support or a JNI-level trampoline factory.
+Suggested path for the GraalVM team:
+Use Truffle NFI's @CEntryPoint or closure mechanism to synthesize native stubs at runtime for CFUNCTYPE instances.
+Expose this through the existing CTypesFunctionObject in GraalPy's ctypes implementation.
+
+[G-2] POINTER(None) Should Resolve to c_void_p
+The Problem: ctypes.POINTER(None) is valid in CPython and resolves to a void pointer type. GraalPy raises a TypeError when this is called because it does not handle None as a special case in its POINTER() implementation.
+The Fix (straightforward): In GraalPy's ctypes.POINTER() implementation, add a check: if the argument is None, return c_void_p. This is a one-line fix in the GraalPy source. The current workaround (patching pypdfium2_raw/bindings.py with sed) is fragile and breaks on package upgrades.
+Impact: This unblocks the initial import of pypdfium2 without requiring downstream patching.
+
+[G-3] Codec Enumeration at Import Time Crashes on Unimplemented Codecs
+The Problem: charset_normalizer 3.4+ iterates over all registered Python codecs at import time to build a lookup table. GraalPy does not implement euc_jis_2004 (and likely several other CJK codecs), so it raises a hard LookupError that crashes the import.
+What GraalPy needs:
+Either implement the missing codecs (large effort), or
+Make codecs.lookup() return a sentinel / raise LookupError gracefully so that calling code can catch it — which it does in CPython, but GraalPy may be raising it at a lower level before the Python try/except can catch it.
+Suggested quick fix for GraalVM team: Ensure that codecs.lookup(name) raises a catchable Python-level LookupError for unknown codecs, rather than a Java-level exception that bypasses the Python exception handler. This would allow charset_normalizer 3.4+ to work without pinning.
+
+[G-4] pip install Compatibility and Package Metadata Resolution
+The Problem: Several packages installed with --no-deps to avoid cascading failures. The root cause is that GraalPy's pip integration sometimes fails mid-dependency-tree on packages with C extensions, causing the entire install to abort rather than skipping just the problematic package.
+Suggested improvement: GraalPy's bundled pip (or graalpy-maven-plugin) should support a --skip-c-extensions flag or equivalent that installs pure-Python wheels and skips packages that require native compilation it cannot handle, reporting them as warnings rather than hard errors.
+
+[G-5] graalpy-maven-plugin Virtual Environment Path Options
+The Problem: The Maven plugin auto-manages python-resources/venv and python-resources/home, but it does not expose options to point at a pre-built external venv that already has docling installed (with all patches applied). Every clean build re-runs pip install docling, which takes several minutes and loses all manual patches.
+Requested feature: Add a <externalVenvPath> configuration option to the plugin that skips venv creation and pip install if the target directory already exists, or that accepts a path to an existing venv managed outside of Maven.
