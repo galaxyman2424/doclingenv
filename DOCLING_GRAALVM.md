@@ -1,11 +1,4 @@
 # DoclingGraalVM — Project History & Effort Log
-
-## Goal
-
-Embed IBM's Docling PDF processing library into a Java application using GraalVM's polyglot API, enabling PDF-to-Markdown conversion to run in-process without subprocess calls.
-
----
-
 ## Java Files Created / Modified
 
 ### `PythonRunner.java`
@@ -95,11 +88,3 @@ sed -i 's/POINTER(None)/c_void_p/g' ~/docling-env/lib/python3.11/site-packages/p
 - `EmbedPythonTest.java` not yet tested end-to-end
 - Version conflicts unresolved: `huggingface-hub 1.7.1` (needs `<1.0`) and `typer 0.24.1` (needs `<0.22.0`)
 
----
-
-## Next Steps
-
-1. Patch `docling_parse_backend.py` to pass a file path string directly to `pdfium.PdfDocument()` instead of a `BytesIO` buffer — this would invoke `FPDF_LoadDocument` (no callbacks) rather than `FPDF_LoadMemDocument` (which requires the broken buffer-reader callback)
-2. Downgrade `huggingface-hub` to `<1.0` and `typer` to `<0.22.0` to resolve remaining version conflicts
-3. Test `EmbedPythonTest.java` end-to-end once PDF conversion is unblocked
-4. Write a reproducible shell script documenting all patches and installs so the environment can be rebuilt without repeating each fix manually
