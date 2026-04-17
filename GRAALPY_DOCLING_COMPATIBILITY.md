@@ -10,7 +10,8 @@ A comprehensive guide to integrating Docling document conversion within GraalVM/
 2. [Section 1: GraalVM/GraalPy Team Action Items](#section-1-graalvmgraalpyteam-action-items)
 3. [Section 2: Docling Team Solutions](#section-2-docling-team-solutions)
 4. [Section 3: Rejected Approaches](#section-3-rejected-approaches)
-5. [Implementation Guide](#implementation-guide)
+5. [Section 4: Native JNI Callback Wrapper](#section-4-native-jni-callback-wrapper-workaround-solution)
+6. [Implementation Guide](#implementation-guide)
 
 ---
 
@@ -451,6 +452,143 @@ Before the JVM starts the GraalPy context, inject Python code that replaces `pyp
 
 ---
 
+## Section 4: Native JNI Callback Wrapper (Workaround Solution)
+
+**Status:** 🟠 **Viable Intermediate Solution**
+
+### The Problem Reframed
+
+The core issue is that GraalPy's ctypes implementation cannot synthesize a native trampoline that satisfies `pypdfium2`'s expectations. Rather than waiting for GraalVM to implement this capability, a **native JNI wrapper library** can bridge the gap by providing the callback mechanism that's missing.
+
+### The Solution: JNI Callback Bridge Library
+
+Create a lightweight native JNI library (`graalpy-ctypes-bridge` or similar) that:
+
+1. **Intercepts the PDF stream read request** from pdfium
+2. **Calls back into the JVM** to retrieve the next chunk of data from Python
+3. **Returns the data to pdfium** without requiring GraalPy's ctypes to create the trampoline
+
+**This solves the problem entirely outside of GraalPy or Docling—it's a third-party shim.**
+
+#### Architecture
+
+```
+┌─────────────────────────────────────────┐
+│         GraalVM/GraalPy Context         │
+│  ┌─────────────────────────────────────┐│
+│  │ Docling + pypdfium2 (with stream)   ││
+│  │  - Creates BytesIO stream           ││
+│  │  - Passes to pdfium.PdfDocument()   ││
+│  └────────────┬────────────────────────┘│
+│               │ (tries to register      │
+│               │  callback, fails        │
+│               │  in GraalPy)            │
+│               │                          │
+│  ┌────────────v────────────────────────┐│
+│  │ JNI Callback Bridge Library          ││
+│  │  - Receives callback registration    ││
+│  │  - Provides native trampoline        ││
+│  │  - Marshals data back/forth          ││
+│  └────────────┬────────────────────────┘│
+└───────────────┼──────────────────────────┘
+                │ (JNI calls)
+         ┌──────v──────┐
+         │  pdfium C   │
+         │  library    │
+         └─────────────┘
+```
+
+#### Implementation Approach
+
+1. **C/C++ component:** Thin native library that:
+   - Registers itself as available to ctypes
+   - Implements a `CFUNCTYPE`-compatible wrapper factory
+   - Allocates native trampolines using system APIs (`mmap`, `execmem`)
+   - Uses JNI to call back into Python when invoked
+
+2. **Java component:** JNI binding class that:
+   - Loads the native library
+   - Exposes `registerCallback(pythonCallable)` → returns function pointer
+   - Marshals arguments between C and Python
+
+3. **Python integration:** Monkey-patch or monkey-patch-free injection that:
+   - Makes ctypes aware of the JNI bridge
+   - Transparently uses the bridge for callback creation instead of failing
+
+#### Example Usage
+
+```python
+# No changes to user code needed
+from docling.document_converter import DocumentConverter
+
+converter = DocumentConverter()
+# When Docling tries to use pypdfium2 with a stream,
+# the JNI bridge silently provides the missing trampoline
+result = converter.convert_document("file.pdf")
+```
+
+**Or with explicit stream support:**
+
+```python
+from io import BytesIO
+from jni_ctypes_bridge import enable_jni_callbacks
+
+enable_jni_callbacks()  # One-time setup
+
+with open("file.pdf", "rb") as f:
+    stream = BytesIO(f.read())
+    # This now works on GraalPy because callbacks are JNI-backed
+    doc = pdfium.PdfDocument(stream)
+```
+
+#### Trade-offs
+
+| Aspect | Impact |
+|--------|--------|
+| **Implementation complexity** | Medium (200–400 lines of C + JNI glue) |
+| **Runtime overhead** | Minimal (one JNI call per PDF chunk read) |
+| **GraalPy changes required** | **None** — completely external workaround |
+| **Docling changes required** | **None** — works transparently with existing code |
+| **Portability** | Requires compilation for each platform (Linux, macOS, Windows, ARM) |
+| **Maintenance burden** | Low (isolated library, no core project dependencies) |
+| **Long-term viability** | Temporary; obsolete once [G-1] is implemented in GraalVM |
+
+#### Advantages Over Waiting for [G-1]
+
+✅ **Works immediately** — no dependency on GraalVM roadmap  
+✅ **Zero changes to Docling or user code** — drop-in library  
+✅ **Can be packaged as a PyPI package** — users do `pip install graalpy-ctypes-bridge`  
+✅ **Benefits the broader GraalPy ecosystem** — fixes ctypes callbacks for any use case  
+✅ **Proves the concept** — provides a working implementation to inform [G-1] design
+
+#### Disadvantages
+
+⚠️ **Requires C/C++ expertise** — not a pure-Python solution  
+⚠️ **Platform-specific** — must be compiled for each OS/architecture  
+⚠️ **Extra dependency** — adds a native library to the GraalPy environment  
+⚠️ **Security implications** — raw JNI code requires careful validation (buffer overflows, etc.)  
+⚠️ **Temporary workaround** — should be superseded by [G-1] long-term
+
+#### Suggested Implementation Path
+
+1. **Phase 1:** Proof-of-concept for Linux x86_64 only
+2. **Phase 2:** Multi-platform support (macOS, Windows ARM64)
+3. **Phase 3:** Package on PyPI with pre-built wheels for common platforms
+4. **Phase 4:** Deprecate once GraalVM implements native [G-1] support
+
+#### Comparison: JNI Bridge vs. Alternatives
+
+| Solution | Effort | Blocking Dependency | Time to Production |
+|----------|--------|-------------------|-------------------|
+| **JNI Bridge (Section 4)** | Medium | None | 2–3 weeks |
+| **[D-1] File-path backend** | Low | Docling team | 1 week (if adopted) |
+| **[G-1] GraalVM ctypes fix** | High | GraalVM team | 2–3 months |
+| **[D-4] docling-lite** | Medium | Docling team | 3–4 weeks (if prioritized) |
+
+**Recommendation:** Pursue **[D-1]** (lowest effort, highest compatibility gain) as the primary path. Use **JNI Bridge** as a stopgap if [D-1] is not adopted, while [G-1] is being developed.
+
+---
+
 ## Implementation Guide
 
 ### For GraalVM Teams: Native Trampoline Architecture
@@ -469,6 +607,38 @@ Write a trampoline into that memory that holds the GlobalRef
 Hand pdfium the address of the trampoline
         ↓
 pdfium calls trampoline → trampoline calls back into JVM via JNI
+```
+
+**Key Insight:** The JVM object itself never needs to be pinned. The trampoline lives in **off-heap memory that the GC never touches**.
+
+### For Docling Teams: Priority Roadmap
+
+#### Phase 1 (Immediate) — High Impact, Low Effort
+1. **[D-1]** File-path-only PDF backend mode (1–2 hours)
+2. **[D-5]** Runtime compatibility table in README (< 2 hours)
+
+#### Phase 2 (Soon) — High Value
+3. **[D-2]** Lazy ML/OCR imports (1–2 weeks)
+4. **[D-3]** Pure-Python pdfminer backend option (1 week)
+
+#### Phase 3 (Strategic)
+5. **[D-4]** `docling-lite` package distribution (1–2 weeks)
+
+---
+
+## Quick Reference: What Unblocks GraalPy
+
+| Fix | Effort | Impact | Owner |
+|-----|--------|--------|-------|
+| [G-2] `POINTER(None)` | ✅ < 1 hour | 🟡 Unblocks imports | GraalVM |
+| [D-1] File-path PDF backend | ✅ < 2 hours | 🟢 **Complete solution** | Docling |
+| [JNI Bridge] Native callback shim | ⏱️ 2–3 weeks | 🟢 **Complete solution** | Third-party |
+| [G-1] Native callbacks | ⏱️ 2–3 weeks | 🟢 **Enables pypdfium2** | GraalVM |
+| [D-2] Lazy ML imports | ⏱️ 1–2 weeks | 🟡 Reduces errors | Docling |
+
+**TL;DR:** Implementing **[D-1]** (file-path PDF backend in Docling) unblocks GraalPy PDF conversion **immediately with minimal effort**. If [D-1] is not adopted, the **JNI Bridge** provides a working workaround **independent of Docling or GraalVM changes**. Implementing **[G-1]** and **[G-2]** in GraalVM enables full compatibility.
+
+---
 
 ## Contact & Discussion
 
