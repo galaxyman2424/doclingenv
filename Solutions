@@ -1,5 +1,3 @@
-Possible Graalpy Solutions
-
 [G-1] Native C Function Pointer Callbacks from Python Callables
 The Core Problem: GraalPy cannot convert a Python CFUNCTYPE-wrapped callable into a native C function pointer. This is the primary blocker. pypdfium2 registers a get_bufreader callback (m_GetBlock) using ctypes.CFUNCTYPE, and when it tries to pass that callback to the underlying C library, GraalPy throws:
 Cannot convert Object pointer to native
@@ -30,6 +28,61 @@ Suggested improvement: GraalPy's bundled pip (or graalpy-maven-plugin) should su
 [G-5] graalpy-maven-plugin Virtual Environment Path Options
 The Problem: The Maven plugin auto-manages python-resources/venv and python-resources/home, but it does not expose options to point at a pre-built external venv that already has docling installed (with all patches applied). Every clean build re-runs pip install docling, which takes several minutes and loses all manual patches.
 Requested feature: Add a <externalVenvPath> configuration option to the plugin that skips venv creation and pip install if the target directory already exists, or that accepts a path to an existing venv managed outside of Maven.
+
+Section 2: Solutions for the Docling Team
+These are changes the Docling project itself could make to improve GraalPy compatibility, independent of GraalVM fixes.
+
+[D-1] Offer a file-path-only PDF Backend Mode
+The Problem: DoclingParseV2DocumentBackend (and similar backends) pass the PDF to pypdfium2 as a BytesIO stream. This triggers the FPDF_LoadMemDocument code path, which requires a C-level read callback — the exact thing GraalPy cannot do.
+If the input were passed as a file path string instead, pypdfium2 would call FPDF_LoadDocument, which reads directly from disk using C stdio — no callback, no Python-to-C trampoline needed.
+Suggested change for Docling team: In docling_parse_backend.py, when path_or_stream is a Path or str, pass it directly to pdfium.PdfDocument(str(path)) instead of wrapping it in a BytesIO. A one-line conditional:
+python
+if isinstance(self.path_or_stream, (str, Path)):
+    self._pdoc = pdfium.PdfDocument(str(self.path_or_stream))
+else:
+    self._pdoc = pdfium.PdfDocument(self.path_or_stream)  # existing stream path
+Impact: This would unblock GraalPy PDF conversion entirely without any GraalVM-side changes.
+
+[D-2] Make ML/OCR Dependencies Fully Optional at Import Time
+The Problem: Even when using DocumentConverter without OCR, importing docling triggers imports deep in the dependency tree that pull in torch, huggingface_hub, and transformers metadata checks. On GraalPy, this causes version conflict warnings and occasional hard failures.
+Suggested change: Move all ML-heavy imports (EasyOcrOptions, TesseractOcrOptions, model pipeline imports) behind TYPE_CHECKING guards or lazy import blocks that only execute when those features are actually requested at runtime. The docling core library should be importable and functional for basic PDF-to-markdown conversion with zero ML dependencies loaded.
+
+[D-3] Expose a pypdfium2-Free Backend for Structural PDF Parsing
+The Problem: All current PDF backends in Docling ultimately depend on pypdfium2 or pdfminer. pypdfium2 is blocked by the GraalPy ctypes issue. pdfminer is pure Python but lacks layout analysis quality.
+Suggested addition: Expose a backend option that uses pdfminer.six exclusively (already a dependency), with a clear accuracy trade-off warning. Users on constrained runtimes (GraalPy, PyPy, Wasm) could opt in:
+python
+converter = DocumentConverter(
+    format_options={InputFormat.PDF: PdfFormatOptions(backend=PdfBackend.PDFMINER)}
+)
+This would give GraalPy users a working, if lower-fidelity, path to PDF conversion today.
+
+[D-4] Ship a docling-lite Package
+The Problem: docling's full dependency tree (torch, torchvision, huggingface_hub, accelerate, scipy, rapidocr, pypdfium2) is enormous (~4GB installed). For embedding scenarios (GraalVM, serverless, CI), this is impractical.
+Suggested packaging: Publish a docling-lite package that includes only the pure-Python conversion pipeline (markdown export, DOCX/HTML/XLSX backends) with pdfminer as the sole PDF backend. This would install in seconds and be trivially embeddable in any Python runtime including GraalPy.
+
+[D-5] Document GraalPy / Alternative Runtime Compatibility
+The Problem: There is no documentation on which Docling backends work on which Python runtimes. Developers targeting GraalPy or PyPy discover incompatibilities only after hours of debugging.
+Suggested addition: Add a "Runtime Compatibility" table to the Docling README:
+Backend
+CPython
+PyPy
+GraalPy
+DoclingParseV2 (pypdfium2)
+✓
+Partial
+✗ (ctypes callback)
+PDFMiner
+✓
+✓
+✓
+DOCX/HTML/MD
+✓
+✓
+✓
+OCR (EasyOCR)
+✓
+✗
+✗
 
 
 Section 3: Rejected Solutions
@@ -74,3 +127,20 @@ The patch has to be applied before pypdfium2 loads its bindings, meaning it must
 Any pypdfium2 upgrade resets the problem.
 The correct fix is either in GraalPy (fix ctypes) or in Docling (use file path instead of stream) — both of which are cleaner and more durable than runtime monkey-patching from Java.
 Debugging a monkey-patched polyglot context is extremely painful.
+
+
+What You'd Actually Need to Build
+The good news is you don't need to pin a JVM object directly. You need to pin a native stub that references the JVM object. That's a much more tractable problem:
+Python callable (movable JVM object)
+        ↓
+Create a stable JVM WeakReference or GlobalRef (JNI already does this)
+        ↓
+Allocate off-heap executable memory via Foreign Memory API
+        ↓
+Write a trampoline into that memory that holds the GlobalRef
+        ↓
+Hand pdfium the address of the trampoline
+        ↓
+pdfium calls trampoline → trampoline calls back into JVM via JNI
+The JVM object itself never needs to be pinned. The trampoline lives in off-heap memory that the GC never touches.
+
