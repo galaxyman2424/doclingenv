@@ -469,37 +469,6 @@ Write a trampoline into that memory that holds the GlobalRef
 Hand pdfium the address of the trampoline
         ↓
 pdfium calls trampoline → trampoline calls back into JVM via JNI
-```
-
-**Key Insight:** The JVM object itself never needs to be pinned. The trampoline lives in **off-heap memory that the GC never touches**.
-
-### For Docling Teams: Priority Roadmap
-
-#### Phase 1 (Immediate) — High Impact, Low Effort
-1. **[D-1]** File-path-only PDF backend mode (1–2 hours)
-2. **[D-5]** Runtime compatibility table in README (< 2 hours)
-
-#### Phase 2 (Soon) — High Value
-3. **[D-2]** Lazy ML/OCR imports (1–2 weeks)
-4. **[D-3]** Pure-Python pdfminer backend option (1 week)
-
-#### Phase 3 (Strategic)
-5. **[D-4]** `docling-lite` package distribution (1–2 weeks)
-
----
-
-## Quick Reference: What Unblocks GraalPy
-
-| Fix | Effort | Impact | Owner |
-|-----|--------|--------|-------|
-| [G-2] `POINTER(None)` | ✅ < 1 hour | 🟡 Unblocks imports | GraalVM |
-| [D-1] File-path PDF backend | ✅ < 2 hours | 🟢 **Complete solution** | Docling |
-| [G-1] Native callbacks | ⏱️ 2–3 weeks | 🟢 **Enables pypdfium2** | GraalVM |
-| [D-2] Lazy ML imports | ⏱️ 1–2 weeks | 🟡 Reduces errors | Docling |
-
-**TL;DR:** Implementing **[D-1]** alone (file-path PDF backend in Docling) unblocks GraalPy PDF conversion **immediately with minimal effort**. Implementing **[G-1]** and **[G-2]** in GraalPy enables full compatibility.
-
----
 
 ## Contact & Discussion
 
