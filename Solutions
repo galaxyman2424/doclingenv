@@ -127,20 +127,3 @@ The patch has to be applied before pypdfium2 loads its bindings, meaning it must
 Any pypdfium2 upgrade resets the problem.
 The correct fix is either in GraalPy (fix ctypes) or in Docling (use file path instead of stream) — both of which are cleaner and more durable than runtime monkey-patching from Java.
 Debugging a monkey-patched polyglot context is extremely painful.
-
-
-What You'd Actually Need to Build
-The good news is you don't need to pin a JVM object directly. You need to pin a native stub that references the JVM object. That's a much more tractable problem:
-Python callable (movable JVM object)
-        ↓
-Create a stable JVM WeakReference or GlobalRef (JNI already does this)
-        ↓
-Allocate off-heap executable memory via Foreign Memory API
-        ↓
-Write a trampoline into that memory that holds the GlobalRef
-        ↓
-Hand pdfium the address of the trampoline
-        ↓
-pdfium calls trampoline → trampoline calls back into JVM via JNI
-The JVM object itself never needs to be pinned. The trampoline lives in off-heap memory that the GC never touches.
-
