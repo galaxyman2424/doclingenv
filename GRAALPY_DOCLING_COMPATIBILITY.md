@@ -637,17 +637,3 @@ pdfium calls trampoline → trampoline calls back into JVM via JNI
 | [D-2] Lazy ML imports | ⏱️ 1–2 weeks | 🟡 Reduces errors | Docling |
 
 **TL;DR:** Implementing **[D-1]** (file-path PDF backend in Docling) unblocks GraalPy PDF conversion **immediately with minimal effort**. If [D-1] is not adopted, the **JNI Bridge** provides a working workaround **independent of Docling or GraalVM changes**. Implementing **[G-1]** and **[G-2]** in GraalVM enables full compatibility.
-
----
-
-## Contact & Discussion
-
-For questions or collaboration on these improvements:
-- **GraalVM Issues:** Submit issues to [GraalVM GitHub](https://github.com/oracle/graal)
-- **Docling Issues:** Submit to [Docling GitHub](https://github.com/DS4SD/docling)
-
----
-
-**Last Updated:** 2025  
-**Status:** Active Development  
-**Priority:** High
